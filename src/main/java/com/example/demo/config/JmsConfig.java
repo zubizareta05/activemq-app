@@ -1,74 +1,66 @@
 package com.example.demo.config;
 
-import com.amazonaws.services.secretsmanager.AWSSecretsManager;
-import com.amazonaws.services.secretsmanager.model.GetSecretValueRequest;
-import com.amazonaws.services.secretsmanager.model.GetSecretValueResult;
+import org.springframework.jms.config.DefaultJmsListenerContainerFactory;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
+import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueRequest;
+import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueResponse;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.activemq.ActiveMQConnectionFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jms.annotation.EnableJms;
-import org.springframework.jms.config.DefaultJmsListenerContainerFactory;
 
-import javax.annotation.PostConstruct;
 import javax.jms.ConnectionFactory;
-import javax.jms.JMSException;
-import java.io.IOException;
-import java.util.Map;
+
 
 @Configuration
 @EnableJms
 public class JmsConfig {
 
-    @Value("${active-mq-username}")
-    private String activeMqUsername;
-
-    @Value("${active-mq-password}")
-    private String activeMqPassword;
-
-    @Autowired
-    private AWSSecretsManager awsSecretsManager;
 
     @Bean
-    public ActiveMQConnectionFactory activeMQConnectionFactory() throws JMSException {
-        ActiveMQConnectionFactory factory = new ActiveMQConnectionFactory();
-        factory.setBrokerURL("tcp://localhost:61616");
-        factory.setUserName(activeMqUsername);
-        factory.setPassword(activeMqPassword);
+    public DefaultJmsListenerContainerFactory jmsListenerContainerFactory(ConnectionFactory connectionFactory) {
+        DefaultJmsListenerContainerFactory factory = new DefaultJmsListenerContainerFactory();
+        factory.setConnectionFactory(connectionFactory);
+        factory.setConcurrency("5-10");
+
         return factory;
     }
 
+
     @Bean
-    public DefaultJmsListenerContainerFactory jmsListenerContainerFactory(ConnectionFactory connectionFactory){
-        DefaultJmsListenerContainerFactory jmsListenerContainerFactory = new DefaultJmsListenerContainerFactory();
+    public ActiveMQConnectionFactory activeMQConnectionFactory() {
+        String secretName = "test/activemq";
+        String username = getSecretValue(secretName, "username");
+        String password = getSecretValue(secretName, "password");
 
-        jmsListenerContainerFactory.setConnectionFactory(connectionFactory);
-        jmsListenerContainerFactory.setConcurrency("5-10");
+        ActiveMQConnectionFactory connectionFactory = new ActiveMQConnectionFactory();
+        connectionFactory.setBrokerURL("tcp://localhost:61616");
+        connectionFactory.setUserName(username);
+        connectionFactory.setPassword(password);
+        connectionFactory.setTrustAllPackages(true);
 
-        return  jmsListenerContainerFactory;
+        return connectionFactory;
     }
 
-
-    //Retrieve credentials from AWSSecretManager Client and set system properties
-    @PostConstruct
-    public void init() {
-        String secretName = "local/activemq/demo";
-        String region = "us-east-1";
-
-        GetSecretValueRequest getSecretValueRequest = new GetSecretValueRequest().withSecretId(secretName);
-        GetSecretValueResult getSecretValueResult = awsSecretsManager.getSecretValue(getSecretValueRequest);
-
-        if (getSecretValueResult.getSecretString() != null) {
-            ObjectMapper objectMapper = new ObjectMapper();
-            try {
-                Map<String, String> secretsMap = objectMapper.readValue(getSecretValueResult.getSecretString(), Map.class);
-                System.setProperty("active-mq-username", secretsMap.get("username"));
-                System.setProperty("active-mq-password", secretsMap.get("password"));
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
+    private String getSecretValue(String secretName, String key) {
+        Region region = Region.of("us-east-1");
+        SecretsManagerClient client = SecretsManagerClient.builder()
+                .region(region)
+                .build();
+        GetSecretValueRequest getSecretValueRequest = GetSecretValueRequest.builder().secretId(secretName).build();
+        GetSecretValueResponse getSecretValueResponse = client.getSecretValue(getSecretValueRequest);
+        String secret = getSecretValueResponse.secretString();
+        ObjectMapper objectMapper = new ObjectMapper();
+        try {
+            JsonNode jsonNode = objectMapper.readTree(secret);
+            return jsonNode.get(key).textValue();
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("Failed to parse secret value", e);
         }
     }
+
 }
